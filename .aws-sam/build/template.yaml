@@ -1,0 +1,39 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: security-group-fqdn
+Transform:
+- AWS::Serverless-2016-10-31
+Resources:
+  ScheduledEventLogger:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: A Lambda function that logs the payload of messages sent to an
+        associated SQS queue.
+      Runtime: nodejs12.x
+      Handler: src/handlers/security-group-fqdn.handler
+      Events:
+        CloudWatchEvent:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+      MemorySize: 128
+      Timeout: 100
+      Policies:
+      - Statement:
+        - Sid: VisualEditor0
+          Effect: Allow
+          Action:
+          - ec2:AuthorizeSecurityGroupIngress
+          - ec2:AuthorizeSecurityGroupEgress
+          - ec2:RevokeSecurityGroupIngress
+          - ec2:RevokeSecurityGroupEgress
+          - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+          - ec2:UpdateSecurityGroupRuleDescriptionsEgress
+          Resource: arn:aws:ec2:*:*:security-group/*
+          Condition:
+            StringLike:
+              ec2:ResourceTag/gazoakley:security-group-egress: ?*
+        - Sid: VisualEditor1
+          Effect: Allow
+          Action: ec2:DescribeSecurityGroups
+          Resource: '*'
+      CodeUri: ScheduledEventLogger
