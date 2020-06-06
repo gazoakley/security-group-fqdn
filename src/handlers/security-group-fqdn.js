@@ -1,16 +1,23 @@
 const EC2 = require('aws-sdk/clients/ec2');
 const { Resolver } = require('dns').promises;
+const pick = require('lodash.pick');
 
-exports.handler = async(event) => {
+const INGRESS_TAG = 'security-group-fqdn:ingress'
+const EGRESS_TAG = 'security-group-fqdn:egress'
+const FROM_PORT_TAG = 'security-group-fqdn:from-port'
+const FROM_PORT_DEFAULT = '443'
+const TO_PORT_TAG = 'security-group-fqdn:to-port'
+const TO_PORT_DEFAULT = '443'
+const PROTOCOL_TAG = 'security-group-fqdn:protocol'
+const PROTOCOL_DEFAULT = 'tcp'
+
+exports.handler = async (event) => {
     var ec2 = new EC2();
 
     var params = {
         Filters: [{
-            Name: "tag-key",
-            Values: [
-                "gazoakley:security-group-ingress",
-                "gazoakley:security-group-egress"
-            ]
+            Name: 'tag-key',
+            Values: [INGRESS_TAG, EGRESS_TAG]
         }]
     };
 
@@ -24,89 +31,85 @@ exports.handler = async(event) => {
 };
 
 async function updateRules(group, ec2) {
-    const fqdn = getTag(group, 'gazoakley:security-group-egress');
+    await updateRulesDirected(group, INGRESS_TAG, group.IpPermissions, params => ec2.authorizeSecurityGroupIngress(params), params => ec2.revokeSecurityGroupIngress(params))
+    await updateRulesDirected(group, EGRESS_TAG, group.IpPermissionsEgress, params => ec2.authorizeSecurityGroupEgress(params), params => ec2.revokeSecurityGroupEgress(params))
+};
+
+async function updateRulesDirected(group, tag, permissions, authorizeFn, revokeFn) {
+    const fqdn = getTag(group, tag);
+    if (!fqdn) { return }
 
     // Query values for FQDN
     const resolver = new Resolver();
     var resolved = [];
-    try {
-        resolved = await resolver.resolve(fqdn);
-    }
-    catch (e) {
-        console.warn(e);
-    }
-    console.log(resolved);
+    resolved = await resolver.resolve(fqdn);
 
-    var permissions = diffRules(group, fromPort, toPort, protocol)
+    // Get permissions changes
+    var permissions = diffPermissions(group, permissions, resolved)
 
-    // Rules to add
+    // Permissions to authorize
     if (permissions.authorize.length > 0) {
         var authorizeParams = { GroupId: group.GroupId, IpPermissions: permissions.authorize };
-        console.log('authorizeParams:', JSON.stringify(authorizeParams, null, 2));
-        await ec2.authorizeSecurityGroupEgress(authorizeParams).promise();
+        console.log('Authorize: %o', authorizeParams);
+        await authorizeFn(authorizeParams).promise();
     }
 
-    // Rules to remove
+    // Permissions to revoke
     if (permissions.revoke.length > 0) {
         var revokeParams = { GroupId: group.GroupId, IpPermissions: permissions.revoke };
-        console.log('revokeParams:', JSON.stringify(revokeParams, null, 2));
-        await ec2.revokeSecurityGroupEgress(revokeParams).promise();
+        console.log('Revoke: %o', revokeParams);
+        await revokeFn(revokeParams).promise();
     }
-};
+}
 
-function diffRules(group, resolved) {
-    console.log(group.GroupName);
-    const fromPort = parseInt(getTag(group, 'gazoakley:security-group-egress-from-port') || '443');
-    const toPort = parseInt(getTag(group, 'gazoakley:security-group-egress-to-port') || '443');
-    const protocol = getTag(group, 'gazoakley:security-group-egress-protocol') || 'tcp';
+function diffPermissions(group, permissions, resolved) {
+    const fromPort = parseInt(getTag(group, FROM_PORT_TAG) || FROM_PORT_DEFAULT);
+    const toPort = parseInt(getTag(group, TO_PORT_TAG) || TO_PORT_DEFAULT);
+    const protocol = getTag(group, PROTOCOL_TAG) || PROTOCOL_DEFAULT;
 
     // Get matching IpPermissions
-    var matchPermissions;
+    var matchedPermission;
     var revokePermissions = [];
-    for (const permissions of group.IpPermissionsEgress) {
-        console.log('permissions:', permissions)
-        if (permissions.FromPort == fromPort &&
-            permissions.ToPort == toPort &&
-            permissions.IpProtocol == protocol) {
-            matchPermissions = permissions;
-            console.log('matchPermissions:', matchPermissions);
-        }
-        else {
-            // revokePermissions.push(permissions);
+    for (const permission of permissions) {
+        const splitPermissions = splitPermission(permission)
+        for (const aPermission of splitPermissions) {
+            if (aPermission.FromPort == fromPort &&
+                aPermission.ToPort == toPort &&
+                aPermission.IpProtocol == protocol &&
+                aPermission.hasOwnProperty('IpRanges')) {
+                matchedPermission = aPermission;
+            } else {
+                revokePermissions.push(aPermission);
+            }
         }
     }
 
     var newRanges = resolved.map(ipRange => (ipRange + '/32'));
-    console.log('newRanges:', newRanges);
-    var oldRanges = ((matchPermissions && matchPermissions.IpRanges) || []).map(ipRange => ipRange.CidrIp)
-    console.log('oldRanges:', oldRanges);
-    
+    var oldRanges = ((matchedPermission && matchedPermission.IpRanges) || []).map(ipRange => ipRange.CidrIp)
+
     var addRanges = getSetDifference(oldRanges, newRanges);
-    console.log('addRanges:', addRanges);
     var authorizePermissions = [];
     if (addRanges.length > 0) {
-        authorizePermissions.push({
-            FromPort: fromPort,
-            ToPort: toPort,
-            IpProtocol: protocol,
-            IpRanges: addRanges.map(range => { return { CidrIp: range } })
-        });
+        authorizePermissions.push(mapPermission(fromPort, toPort, protocol, addRanges))
     }
     var removeRanges = getSetDifference(newRanges, oldRanges);
-    console.log('removeRanges:', removeRanges);
     if (removeRanges.length > 0) {
-        revokePermissions.push({
-            FromPort: fromPort,
-            ToPort: toPort,
-            IpProtocol: protocol,
-            IpRanges: removeRanges.map(range => { return { CidrIp: range } })
-        })
+        revokePermissions.push(mapPermission(fromPort, toPort, protocol, removeRanges))
     }
 
     return {
         authorize: authorizePermissions,
         revoke: revokePermissions
     }
+}
+
+function mapPermission(fromPort, toPort, protocol, ranges) {
+    return {
+        FromPort: fromPort,
+        ToPort: toPort,
+        IpProtocol: protocol,
+        IpRanges: ranges.map(range => { return { CidrIp: range } })
+    };
 }
 
 function getTag(group, key) {
@@ -126,3 +129,21 @@ function getSetDifference(a, b) {
     }
     return complements;
 }
+
+function splitPermission(permission) {
+    const permissions = []
+    const commonProperties = ['FromPort', 'ToPort', 'IpProtocol']
+    const splitProperties = ['UserIdGroupPairs', 'IpRanges', 'Ipv6Ranges', 'PrefixListIds']
+    for (const splitProperty of splitProperties) {
+        if (permission.hasOwnProperty(splitProperty) && permission[splitProperty].length > 0) {
+            var pickProperties = commonProperties.concat([splitProperty])
+            permissions.push(pick(permission, pickProperties))
+        }
+    }
+    return permissions;
+}
+
+Object.assign(exports, {
+    FROM_PORT_TAG, TO_PORT_TAG, PROTOCOL_TAG,
+    diffPermissions, getTag, getSetDifference, mapPermission, splitPermission
+});

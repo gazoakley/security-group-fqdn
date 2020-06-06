@@ -3,11 +3,20 @@
     "description": "replaced-by-user-input",
     "version": "0.0.1",
     "private": true,
-    "dependencies": {},
+    "dependencies": {
+        "lodash.pick": "^4.4.0"
+    },
     "devDependencies": {
+        "aws-sdk": "^2.691.0",
         "jest": "^24.7.1"
     },
     "scripts": {
         "test": "jest"
+    },
+    "jest": {
+        "testPathIgnorePatterns": [
+            "<rootDir>/.aws-sam/",
+            "/node_modules/"
+        ]
     }
 }
