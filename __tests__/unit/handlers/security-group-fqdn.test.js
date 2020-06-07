@@ -255,13 +255,3 @@ describe('Test for security-group-fqdn', function () {
         })
     });
 });
-
-// function getSetDifference(a, b) {
-//     const complements = [];
-//     for (const bVal of b) {
-//         if (!a.some(aVal => aVal == bVal)) {
-//             complements.push(bVal);
-//         }
-//     }
-//     return complements;
-// }
