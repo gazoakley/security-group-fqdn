@@ -7,7 +7,7 @@
         "lodash.pick": "^4.4.0"
     },
     "devDependencies": {
-        "aws-sdk": "^2.691.0",
+        "aws-sdk": "^2.814.0",
         "jest": "^24.7.1"
     },
     "scripts": {
